@@ -1,6 +1,6 @@
 #include "ets_sys.h"
 #include "osapi.h"
-#include "gpio.h"
+#include "nodemcu_gpio.h"
 #include "os_type.h"
 #include "user_config.h"
 
@@ -11,6 +11,7 @@ static void user_procTask(os_event_t *events);
 
 static volatile os_timer_t some_timer;
 
+#define EXT_PIN_BIT NM_BIT10
 
 void some_timerfunc(void *arg)
 {
@@ -18,16 +19,12 @@ void some_timerfunc(void *arg)
 	if (GPIO_REG_READ(GPIO_OUT_ADDRESS) & BIT2)
 	{
 		//Set GPIO2 to LOW
-		// gpio_output_set(0, BIT2, BIT2, 0);
-		// gpio_output_set(0, BIT5, BIT5, 0);
-		gpio_output_set(0, BIT2|BIT5, BIT2|BIT5, 0);
+		gpio_output_set(0, BIT2|EXT_PIN_BIT, BIT2|EXT_PIN_BIT, 0);
 	}
 	else
 	{
 		//Set GPIO2 to HIGH
-		// gpio_output_set(BIT2, 0, BIT2, 0);
-		// gpio_output_set(BIT5, 0, BIT5, 0);
-		gpio_output_set(BIT2|BIT5, 0, BIT2|BIT5, 0);
+		gpio_output_set(BIT2|EXT_PIN_BIT, 0, BIT2|EXT_PIN_BIT, 0);
 	}
 }
 
@@ -47,10 +44,10 @@ user_init()
 
 	//Set GPIO2 to output mode
 	PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO2_U, FUNC_GPIO2);
-	PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO5_U, FUNC_GPIO5);
+	PIN_FUNC_SELECT(NM_NAME10, NM_FUNC10);
 
 	//Set GPIO2 low
-	gpio_output_set(0, BIT2|BIT5, BIT2|BIT5, 0);
+	gpio_output_set(0, BIT2|EXT_PIN_BIT, BIT2|EXT_PIN_BIT, 0);
 
 	//Disarm timer
 	os_timer_disarm(&some_timer);
