@@ -40,3 +40,14 @@
 #define NM_BIT9	BIT3
 #define NM_BIT10	BIT1
 #define NM_BIT_LED	BIT2
+
+#define NM_ID1	GPIO_ID_PIN(5)
+#define NM_ID2	GPIO_ID_PIN(4)
+#define NM_ID3	GPIO_ID_PIN(0)
+#define NM_ID4	GPIO_ID_PIN(2)
+#define NM_ID5	GPIO_ID_PIN(14)
+#define NM_ID6	GPIO_ID_PIN(12)
+#define NM_ID7	GPIO_ID_PIN(13)
+#define NM_ID8	GPIO_ID_PIN(15)
+#define NM_ID9	GPIO_ID_PIN(3)
+#define NM_ID10	GPIO_ID_PIN(1)
