@@ -24,6 +24,7 @@ typedef enum
 typedef struct
 {
 	clock_state_t state;
+	int state_changed;
 	unsigned hour;
 	unsigned minute;
 	unsigned digit_current;
@@ -176,12 +177,7 @@ void ICACHE_FLASH_ATTR timer_clock(void *arg)
 {
 	nixie_clock_t *clock = (nixie_clock_t*)arg;
 	if (clock->state == CLOCK_VIEW) nixie_clock_time_load(clock);
-
-	bool osf;
-	if (ds3231_getOscillatorStopFlag(&osf))
-	{
-		os_printf("osf: %d\n", osf);
-	}
+	if (clock->state_changed > 0) clock->state_changed--;
 }
 
 
@@ -231,6 +227,7 @@ void interrupt_gpio(void *arg)
 static void ICACHE_FLASH_ATTR nixie_clock_init(nixie_clock_t *clock)
 {
 	clock->state = CLOCK_VIEW;
+	clock->state_changed = 0;
 	clock->hour = 0;
 	clock->minute = 0;
 	clock->digit_current = 0;
@@ -308,6 +305,8 @@ static void ICACHE_FLASH_ATTR nixie_clock_time_save(nixie_clock_t *clock)
 
 static void ICACHE_FLASH_ATTR nixie_clock_state_next(nixie_clock_t *clock)
 {
+	if (clock->state_changed > 0) return;    // Prevents rapid state changes
+
 	switch (clock->state)
 	{
 		case CLOCK_VIEW:
@@ -323,6 +322,8 @@ static void ICACHE_FLASH_ATTR nixie_clock_state_next(nixie_clock_t *clock)
 			clock->state = CLOCK_VIEW;
 			break;
 	}
+
+	clock->state_changed = 3;
 }
 
 static void ICACHE_FLASH_ATTR nixie_clock_knob_rotation(nixie_clock_t *clock, int direction)
