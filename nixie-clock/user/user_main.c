@@ -1,6 +1,9 @@
+#define USE_US_TIMER
 #include "ets_sys.h"
 #include "osapi.h"
 #include "gpio16.h"
+#include "i2c_master.h"
+#include "ds3231.h"
 #include "nodemcu_gpio.h"
 #include "os_type.h"
 #include "user_config.h"
@@ -15,6 +18,7 @@ typedef enum
 	CLOCK_VIEW,
 	CLOCK_SET_HR,
 	CLOCK_SET_MIN,
+	CLOCK_ERROR,
 } clock_state_t;
 
 typedef struct
@@ -34,9 +38,19 @@ typedef struct
 	uint32 id_button;
 	uint32 id_rot_clk;
 	volatile os_timer_t timer_digit;
-	volatile os_timer_t timer_tmp;
+	volatile os_timer_t timer_clock;
 } nixie_clock_t;
 
+static void ICACHE_FLASH_ATTR nixie_clock_init(nixie_clock_t *clock);
+static void ICACHE_FLASH_ATTR nixie_clock_time_load(nixie_clock_t *clock);
+static void ICACHE_FLASH_ATTR nixie_clock_time_save(nixie_clock_t *clock);
+static void ICACHE_FLASH_ATTR nixie_clock_state_next(nixie_clock_t *clock);
+static void ICACHE_FLASH_ATTR nixie_clock_knob_rotation(nixie_clock_t *clock, int direction);
+
+
+/*
+ * Utils
+ */
 
 static unsigned ICACHE_FLASH_ATTR rollover_add(unsigned x, int y, unsigned b)
 {
@@ -94,7 +108,18 @@ static uint16 ICACHE_FLASH_ATTR encode_state(clock_state_t state)
 	}
 }
 
-static unsigned digit_tmp = 0;
+static void ICACHE_FLASH_ATTR timer_kickoff(volatile os_timer_t *timer, os_timer_func_t *fn, unsigned delay, void *arg)
+{
+	os_timer_disarm(timer);
+	os_timer_setfn(timer, fn, arg);
+	os_timer_arm_us(timer, delay, 1);
+}
+
+
+
+/*
+ * Timers
+ */
 
 void ICACHE_FLASH_ATTR timer_display_test(void *arg)
 {
@@ -108,11 +133,11 @@ void ICACHE_FLASH_ATTR timer_display_test(void *arg)
 	num++;
 }
 
-void ICACHE_FLASH_ATTR timer_clock(void *arg)
+void ICACHE_FLASH_ATTR timer_display(void *arg)
 {
 	nixie_clock_t *clock = (nixie_clock_t*)arg;
 
-	if (clock->state != CLOCK_VIEW)
+	if (clock->state == CLOCK_SET_HR || clock->state == CLOCK_SET_MIN)
 	{
 		int delta = 0;
 		if (clock->rot_up >= 2)
@@ -128,14 +153,11 @@ void ICACHE_FLASH_ATTR timer_clock(void *arg)
 
 		if (delta && clock->state == CLOCK_SET_HR) clock->hour = rollover_add(clock->hour, delta, 24);
 		else if (delta && clock->state == CLOCK_SET_MIN) clock->minute = rollover_add(clock->minute, delta, 60);
-
-		if (delta) {
-			os_printf("delta: %d, state: %d %u:%u\n", delta, clock->state, clock->hour, clock->minute);
-		}
 	}
 
 	uint16 digit = 0;
-	switch (clock->digit_current)
+	if (clock->state == CLOCK_ERROR) digit = 9;
+	else switch (clock->digit_current)
 	{
 		case 0: digit = clock->hour / 10; break;
 		case 1: digit = clock->hour % 10; break;
@@ -150,29 +172,24 @@ void ICACHE_FLASH_ATTR timer_clock(void *arg)
 	clock->digit_current = clock->digit_current + 1 & 3;
 }
 
-void ICACHE_FLASH_ATTR timer_tmp(void *arg)
+void ICACHE_FLASH_ATTR timer_clock(void *arg)
 {
 	nixie_clock_t *clock = (nixie_clock_t*)arg;
+	if (clock->state == CLOCK_VIEW) nixie_clock_time_load(clock);
 
-	if (clock->state == CLOCK_VIEW)
+	bool osf;
+	if (ds3231_getOscillatorStopFlag(&osf))
 	{
-		clock->minute++;
-		if (clock->minute >= 60)
-		{
-			clock->minute = 0;
-			clock->hour = rollover_add(clock->hour, 1, 24);
-		}
+		os_printf("osf: %d\n", osf);
 	}
 }
 
-static void ICACHE_FLASH_ATTR timer_kickoff(volatile os_timer_t *timer, os_timer_func_t *fn, unsigned delay, void *arg)
-{
-	os_timer_disarm(timer);
-	os_timer_setfn(timer, fn, arg);
-	os_timer_arm(timer, delay, 1);
-}
 
-void nixie_gpio_interrupt(void *arg)
+/*
+ * Interrupt handlers
+ */
+
+void interrupt_gpio(void *arg)
 {
 	nixie_clock_t *clock = (nixie_clock_t*)arg;
 
@@ -183,23 +200,7 @@ void nixie_gpio_interrupt(void *arg)
 	{
 		gpio_pin_intr_state_set(clock->id_button, GPIO_PIN_INTR_DISABLE);
 
-		switch (clock->state)
-		{
-			case CLOCK_VIEW:
-				gpio_output_set(0, NM_BIT_LED, NM_BIT_LED, 0);
-				clock->state = CLOCK_SET_HR;
-				break;
-			case CLOCK_SET_HR:
-				gpio_output_set(NM_BIT_LED, 0, NM_BIT_LED, 0);
-				gpio16_output_set(0);
-				clock->state = CLOCK_SET_MIN;
-				break;
-			case CLOCK_SET_MIN:
-				gpio16_output_set(1);
-				clock->state = CLOCK_VIEW;
-				break;
-		}
-
+		nixie_clock_state_next(clock);
 		os_delay_us(1000);
 
 		GPIO_REG_WRITE(GPIO_STATUS_W1TC_ADDRESS, gpio_status & clock->pin_button);
@@ -213,31 +214,32 @@ void nixie_gpio_interrupt(void *arg)
 
 		gpio_pin_intr_state_set(clock->id_rot_clk, GPIO_PIN_INTR_DISABLE);
 		uint32 input = gpio_input_get();
-		uint32 rot_data = input & clock->pin_rot_clk ^ (input & clock->pin_rot_data) >> 1;
+		uint32 direction = input & clock->pin_rot_clk ^ (input & clock->pin_rot_data) >> 1;
 
-		if (rot_data)
-		{
-			clock->rot_up++;
-			clock->rot_down = 0;
-		}
-		else
-		{
-			clock->rot_up = 0;
-			clock->rot_down++;
-		}
+		nixie_clock_knob_rotation(clock, direction);
 
 		GPIO_REG_WRITE(GPIO_STATUS_W1TC_ADDRESS, gpio_status & clock->pin_rot_clk);
 		gpio_pin_intr_state_set(clock->id_rot_clk, GPIO_PIN_INTR_ANYEDGE);
 	}
 }
 
+
+/*
+ * nixie_clock_t
+ */
+
 static void ICACHE_FLASH_ATTR nixie_clock_init(nixie_clock_t *clock)
 {
 	clock->state = CLOCK_VIEW;
-	clock->hour = 12;
-	clock->minute = 34;
+	clock->hour = 0;
+	clock->minute = 0;
 	clock->digit_current = 0;
-	os_timer_disarm(&clock->timer_digit);
+
+	// General
+	system_timer_reinit();                         // Needed for us-precision timers
+	gpio_init();
+	uart_div_modify(0, UART_CLK_FREQ / 115200);    // Needed for readable os_printf()
+	i2c_master_gpio_init();
 
 	// Outputs
 	PIN_FUNC_SELECT(NM_NAME1, NM_FUNC1);  // clock - SHCP
@@ -262,37 +264,101 @@ static void ICACHE_FLASH_ATTR nixie_clock_init(nixie_clock_t *clock)
 
 	// Interrupts
 	ETS_GPIO_INTR_DISABLE();
-	ETS_GPIO_INTR_ATTACH(nixie_gpio_interrupt, clock);
+	ETS_GPIO_INTR_ATTACH(interrupt_gpio, clock);
 	GPIO_REG_WRITE(GPIO_STATUS_W1TC_ADDRESS, clock->pin_button | clock->pin_rot_clk);
 	gpio_pin_intr_state_set(clock->id_button, GPIO_PIN_INTR_POSEDGE);
 	gpio_pin_intr_state_set(clock->id_rot_clk, GPIO_PIN_INTR_ANYEDGE);
 	ETS_GPIO_INTR_ENABLE();
 
 	// LEDs
-	PIN_FUNC_SELECT(NM_NAME_LED, NM_FUNC_LED);
-	gpio_output_set(NM_BIT_LED, 0, NM_BIT_LED, 0);
 	gpio16_output_conf();
-	gpio16_output_set(1);
+	gpio16_output_set(1);   // TODO: ???
+
+	// DS3231
+	bool osf = 0;
+	if (!ds3231_getOscillatorStopFlag(&osf)) clock->state = CLOCK_ERROR;
+	else if (osf)
+	{
+		time_t stamp = 627016277;
+		struct tm time = *localtime(&stamp);
+		ds3231_setTime(&time);
+	}
 }
+
+static void ICACHE_FLASH_ATTR nixie_clock_time_load(nixie_clock_t *clock)
+{
+	time_t epoch = 0;
+	struct tm time = *localtime(&epoch);
+	if (!ds3231_getTime(&time)) clock->state = CLOCK_ERROR;
+	else
+	{
+		clock->hour = time.tm_hour;
+		clock->minute = time.tm_min;
+	}
+}
+
+static void ICACHE_FLASH_ATTR nixie_clock_time_save(nixie_clock_t *clock)
+{
+	time_t epoch = 0;
+	struct tm time = *localtime(&epoch);
+	time.tm_hour = clock->hour;
+	time.tm_min = clock->minute;
+	if (!ds3231_setTime(&time) || !ds3231_clearOscillatorStopFlag()) clock->state = CLOCK_ERROR;
+}
+
+static void ICACHE_FLASH_ATTR nixie_clock_state_next(nixie_clock_t *clock)
+{
+	switch (clock->state)
+	{
+		case CLOCK_VIEW:
+			clock->state = CLOCK_SET_HR;
+			break;
+		case CLOCK_SET_HR:
+			gpio16_output_set(0);   // TODO: TMP
+			clock->state = CLOCK_SET_MIN;
+			break;
+		case CLOCK_SET_MIN:
+			gpio16_output_set(1);   // TODO: TMP
+			nixie_clock_time_save(clock);
+			clock->state = CLOCK_VIEW;
+			break;
+	}
+}
+
+static void ICACHE_FLASH_ATTR nixie_clock_knob_rotation(nixie_clock_t *clock, int direction)
+{
+	if (direction)
+	{
+		clock->rot_up++;
+		clock->rot_down = 0;
+	}
+	else
+	{
+		clock->rot_up = 0;
+		clock->rot_down++;
+	}
+}
+
+
+
+/*
+ * Main
+ */
 
 static void ICACHE_FLASH_ATTR user_procTask(os_event_t *events)
 {
-	os_delay_us(10);
+	os_delay_us(5);
 }
 
 void ICACHE_FLASH_ATTR user_init()
 {
-	static nixie_clock_t nixie_clock;
-
-	gpio_init();
-	uart_div_modify(0, UART_CLK_FREQ / 115200);
-	os_printf("Nixie clock initialized!\n");
+	static nixie_clock_t nixie_clock = { 0 };
 
 	nixie_clock_init(&nixie_clock);
+	timer_kickoff(&nixie_clock.timer_digit, timer_display, 859, &nixie_clock);
+	timer_kickoff(&nixie_clock.timer_clock, timer_clock, 135589, &nixie_clock);
 
-	timer_kickoff(&nixie_clock.timer_digit, timer_clock, 1, &nixie_clock);
-	// timer_kickoff(&nixie_clock.timer_digit, timer_display_test, 500, &nixie_clock);
-	timer_kickoff(&nixie_clock.timer_tmp, timer_tmp, 1000, &nixie_clock);
+	os_printf("Nixie clock initialized!\n");
 
 	system_os_task(user_procTask, user_procTaskPrio, user_procTaskQueue, user_procTaskQueueLen);
 }
