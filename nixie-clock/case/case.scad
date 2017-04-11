@@ -8,6 +8,8 @@ translate([15, 0, 15-1.5]) mirror([1, 0, 0]) nixieCorner();
 translate([0, 10, 15-1.5]) mirror([0, 1, 0]) nixieCorner();
 translate([15, 10, 15-1.5]) mirror([1, 1, 0]) nixieCorner();
 
+#translate([1.5, 2.8, 1.2]) cube([12, .2, 12.1]);
+
 %translate([0, -.4, 0]) cube([15, .4, 15]);
 %translate([0, 10, 0]) cube([15, .4, 15]);
 %translate([-.4, 0, 0]) cube([.4, 10, 15]);
